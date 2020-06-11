@@ -1,3 +1,428 @@
+
+--[[
+     BoosterQueue
+--]]
+Collection = {}
+function Collection:new (o)
+  o = o or {}
+  setmetatable(o, self)
+  self.__index = self
+  self.first = 0
+  self.last = -1
+  self.count = 0
+  return o
+end
+
+function Collection:push(value)
+  self.last = self.last + 1;
+  self[self.last] = value
+  self.count = self.count + 1
+end
+
+function Collection:popNext()
+  local first = self.first
+  if first > self.last then return nil end
+  local value = self[first]
+  self[first] = nil
+  self.first = first + 1
+  self.count = self.count - 1
+
+  return value
+end
+
+function Collection:hasItem()
+  return self.first <= self.last
+end
+
+function Collection:getCount()
+  return self.count
+end
+
+
+
+  --[[
+       BoosterQueue
+  --]]
+boosterQueue = Collection:new()
+
+--[[
+     Worker
+--]]
+worker = {};
+worker.isRunning = false;
+worker.keepBasicLands = false;
+worker.asBooster = false;
+
+function worker.run()
+  if not worker.isRunning then
+    worker.isRunning = true;
+    worker.determineOptions();
+    worker.handleQueue();
+  end
+end
+
+function worker.handleQueue()
+  if boosterQueue:hasItem() then
+    local nextTask = boosterQueue:popNext();
+    worker.appendOptionsToTask(nextTask);
+    boosterCreator.createByTask(nextTask, function() worker.handleQueue() end);
+  else
+    worker.isRunning = false;
+  end
+end
+
+function worker.appendOptionsToTask(task)
+  task.keepBasicLands = worker.keepBasicLands;
+  task.asBooster = worker.asBooster;
+  return task;
+end
+
+function worker.determineOptions()
+  worker.keepBasicLands = keepBasicLands();
+  worker.asBooster = spawnAsBooster();
+end
+
+--[[
+     BoosterCreator
+--]]
+boosterCreator = {
+  cardQueue = Collection:new(),
+  bagGuid = '', --guId of bag
+  cards = {}, -- table of cardObjects
+  onFinish = function() end -- function after on booster was created
+};
+
+function boosterCreator.createByTask(task, onFinish)
+  boosterCreator.onFinish = onFinish;
+  boosterCreator.addBoosterToQueue(task);
+  if task.asBooster then
+    boosterCreator.createBag(task);
+  else
+    boosterCreator.createCardsFromQueue(task);
+  end
+
+end
+
+function boosterCreator.createBag(task)
+  local targetPosition = getObjectFromGUID(boardId).getPosition();
+  targetPosition.y = targetPosition.y + 10;
+  local spawnParams = {
+    type = "Custom_Model",
+    position = targetPosition,
+    rotation={x=0, y=180, z=0}
+  }
+  local bag = spawnObject(spawnParams)
+  bag.setName(setLoader.getSet(task.setId).setName);
+  bag.use_gravity = false
+  local bagName = task.setId;
+  if bagName == "con" then
+    bagName = "con_"
+  end
+  local options = {
+    mesh = "https://raw.githubusercontent.com/buflix/mtg-booster-gen/master/bag/mesh",
+    diffuse = "https://github.com/buflix/mtg-booster-gen/blob/master/bag/prints/" .. bagName .. ".png?raw=true",
+    normal = "https://github.com/buflix/mtg-booster-gen/blob/master/bag/normal.png?raw=true",
+    type = '6',
+  }
+  bag.setCustomObject(options)
+  -- only allow cards and decks in the bag to denie bag in bag
+  bag.script_code = 'function filterObjectEnter(obj) if obj.tag == "CARD" or obj.tag == "Deck" then return true else return false end end'
+  -- have to reload the bag toload the script and type
+  local newBag = bag.reload()
+  local waitForReload = function ()
+    boosterCreator.bagGuid = newBag.guid
+    boosterCreator.createCardsFromQueue(task)
+  end
+  Wait.frames(waitForReload, 15)
+end
+
+function boosterCreator.createCardsFromQueue(task)
+  if boosterCreator.cardQueue:hasItem() then
+    local card = boosterCreator.cardQueue:popNext();
+    local onCardSpawn = function(object)
+      boosterCreator.applyCardOptions(object, card.name, card.picture);
+      boosterCreator.createCardsFromQueue(task);
+    end
+    boosterCreator.createCard(boosterCreator.determineCardSpawnPosition(task), onCardSpawn);
+  else
+    local handleDeck = nil;
+    local deck = boosterCreator.groupCards();
+    if task.asBooster then
+      handleDeck = function() boosterCreator.putCardsIntoBag(deck) end
+    else
+      handleDeck = function() boosterCreator.onFinish() end
+    end
+    Wait.frames(handleDeck, 15) --wait one frame until deck is created
+  end
+end
+
+function boosterCreator.groupCards()
+  local decks = group(boosterCreator.cards);
+  local cardStack = nil;
+  for index,deck in ipairs(decks) do cardStack = deck end
+
+  return cardStack;
+end
+
+function boosterCreator.determineCardSpawnPosition(task)
+  local targetPosition = getObjectFromGUID(boardId).getPosition();
+  local boosterMod =  (task.asBooster and -5 or 0)
+  targetPosition.x = targetPosition.x - boosterMod;
+  targetPosition.y = (boosterCreator.cardQueue:getCount() + 1) / 4 + 1 + targetPosition.y -- use different hights, to avoid rnd stacks
+
+  return targetPosition
+end
+
+function boosterCreator.putCardsIntoBag(deck)
+  local bag = getObjectFromGUID(boosterCreator.bagGuid);
+  bag.putObject(deck)
+  bag.use_gravity = true;
+  boosterCreator.onFinish();
+end
+
+function boosterCreator.addBoosterToQueue(task)
+  local set = setLoader.getSet(task.setId);
+  local landmod = 0
+
+  if #set.land > 0 then
+    if task.keepBasicLands then
+      boosterCreator.addCardsByRarity(set, 'land', 1);
+    end
+  else
+    landmod = 1;
+  end
+
+  boosterCreator.addCardsByRarity(set, 'common', 10 + landmod)
+  boosterCreator.addCardsByRarity(set, 'uncommon', 3)
+  if boosterCreator.willDrawMythic(set) then
+    boosterCreator.addCardsByRarity(set, 'mythic', 1)
+  else
+    boosterCreator.addCardsByRarity(set, 'rare', 1)
+  end
+
+end
+
+function boosterCreator.addCardsByRarity(set, rarity, amount)
+  for i = 1, amount do
+    local card = set[rarity][math.random(1, #set[rarity])];
+    local entity = {
+      picture = card.image_uris.normal,
+      name = card.name
+    };
+    boosterCreator.cardQueue:push(entity);
+  end
+end
+
+function boosterCreator.willDrawMythic(set)
+  return #set.mythic > 0 and math.random(8) == 1
+end
+
+function boosterCreator.createCard(position, callback)
+  spawnParams = {
+    type = "CARD",
+    position = position,
+    rotation={x=180, y=0, z=0},
+    callback_function = callback
+  }
+  return spawnObject(spawnParams)
+end
+
+function boosterCreator.applyCardOptions(object, name, picture)
+  object.setName(name);
+  local params = {
+    face = picture,
+    back = 'https://github.com/buflix/mtg-booster-gen/blob/master/card/back.jpg?raw=true',
+  }
+  object.setCustomObject(params)
+  table.insert(boosterCreator.cards, object);
+end
+
+--[[
+     setLoader
+--]]
+setLoader = {};
+setLoader.processing = false;
+setLoader.sets = {};
+setLoader.onSetIsLoaded = function() end;
+
+function setLoader.loadSet(setId, callback)
+  if setLoader.hasSet(setId) then
+    callback();
+  else
+    if setLoader.processing then
+      printToAll("Can only fetch one set at the same time. Pls try again later", {r=1,g=0,b=0})
+    else
+      printToAll("Fetching set...");
+      setLoader.processing = true;
+      setLoader.requestSet(setId, 1)
+    end
+  end
+end
+
+function setLoader.requestSet(setId, page)
+  local request = "https://api.scryfall.com/cards/search?page=" .. page .. "&q=include%3Aextras+e%3A" .. setId
+  printToAll(request)
+  local waitUntilResponseExists = function(response)
+    local pipeFunc = function() setLoader.onFetchSetResponse(response, page) end
+    local checkResponse = function() return response.is_done end
+    Wait.condition(pipeFunc, checkResponse)
+  end
+
+  WebRequest.get(request, function(response) waitUntilResponseExists(response) end)
+
+end
+
+function setLoader.onFetchSetResponse(response, page)
+  local cards = luaJson.json2lua(response.text)
+  local setId = cards.data[1].set
+  local setName = cards.data[1].set_name;
+  local existingSet = setLoader.sets[setId]
+  local splittedSet = setLoader.splitByRarity(cards, existingSet)
+
+  splittedSet.setName = setName;
+  setLoader.sets[setId] = splittedSet;
+  if cards.has_more then
+    setLoader.requestSet(setId, page + 1)
+  else
+    setLoader.processing = false;
+    printToAll('Loading complete')
+    setLoader.onSetIsLoaded();
+    loadSet(setId);
+  end
+end
+
+function setLoader.splitByRarity(cards, existingSet)
+  local preparedSet
+  if existingSet == nil then
+    preparedSet = {
+      common = {},
+      uncommon = {},
+      rare = {},
+      mythic = {},
+      land = {}
+    }
+  else
+    preparedSet = existingSet
+  end
+
+  for i = 1, #cards.data do
+    local currentCard = cards.data[i];
+    local rarity
+    if  currentCard.booster then
+      if string.match(currentCard.type_line, 'Basic Land') then
+        rarity = 'land'
+      else
+        rarity = currentCard.rarity;
+      end
+      local currentLength = #preparedSet[rarity];
+      preparedSet[rarity][currentLength + 1] = currentCard;
+    end
+  end
+  return preparedSet
+end
+
+function setLoader.hasSet(setId)
+  return not (setLoader.sets[setId] == nil);
+end
+
+function setLoader.isProcessing()
+  return setLoader.processing;
+end
+
+function setLoader.getSet(setId)
+  return setLoader.sets[setId];
+end
+
+--[[
+     Board
+--]]
+boardId = '49e878'
+
+
+function keepBasicLands()
+  local keepBasicLandsId = 'f7e933'
+  local object = getObjectFromGUID(keepBasicLandsId);
+  return object.is_face_down
+end
+
+function spawnAsBooster()
+  local guId = '1645a7'
+  local object = getObjectFromGUID(guId);
+  return not object.is_face_down
+end
+
+function getAmountOfBoosters()
+  local guId = 'bf0ba7'
+  local object = getObjectFromGUID(guId);
+  return object.getValue();
+end
+
+
+function loadSet(setId)
+  if setLoader.hasSet(setId) then
+    triggerBoosterCreation(setId);
+  else
+    setLoader.loadSet(setId, function() triggerBoosterCreation(setId) end);
+  end
+end
+
+function triggerBoosterCreation(setId)
+  for i = 1, getAmountOfBoosters() do
+    local task = createTask(setId);
+    boosterQueue:push(task);
+  end
+  worker.run();
+end
+
+function createTask(setId)
+  return {
+    setId = setId,
+    keepBasicLands = false,
+    asBooster = false
+  }
+end
+
+--[[
+Buttons
+--]]
+
+function onLoad()
+  local table = getObjectFromGUID(boardId);
+  local size = table.getBoundsNormalized().size;
+  local pos = table.getPosition();
+  pos.y = pos.y + 1
+
+  zoneSpawn = {position = pos
+         , scale = size
+         , type = 'ScriptingTrigger'
+         , callback = 'zoneCallback'
+         , callback_owner = self
+         , rotation = table.getRotation() }
+  spawnObject(zoneSpawn)
+
+end
+
+function zoneCallback(zone)
+  for _,object in ipairs(zone.getObjects()) do
+    if object.tag == 'Tile' then
+    params = {
+        click_function = "click_func",
+        function_owner = self,
+        position       = {0, 0, 0},
+        width          = 1000,
+        height         = 1000,
+        font_size      = 340,
+        tooltip        = object.getName()
+    }
+    object.createButton(params)
+    end
+  end
+end
+  --zone.destruct() --destroy the zone when you're done with it, to avoid clutter.
+function click_func(obj, color, alt_click)
+      loadSet(obj.getDescription())
+end
+
 -- https://github.com/BanMing/BanMingLuaLab/blob/master/LuaTest/Test/LuaJson.lua
 luaJson = {}
 local function json2true(str, from, to)
@@ -255,435 +680,3 @@ function luaJson.table2json(tab)
 end
 
 -- end
-
---[[
-     BoosterQueue
---]]
-boosterQueue = {
-  first = 0,
-  last = -1
-};
-
-function boosterQueue.push(value)
-  boosterQueue.last = boosterQueue.last + 1;
-  boosterQueue[boosterQueue.last] = value
-end
-
-function boosterQueue.popNext()
-  local first = boosterQueue.first
-  if first > boosterQueue.last then return nil end
-  local value = boosterQueue[first]
-  boosterQueue[first] = nil
-  boosterQueue.first = first + 1
-  return value
-end
-
-function boosterQueue.hasItem()
-  return boosterQueue.first <= boosterQueue.last
-end
-
--- BoosterTask
-
-function createTask(setId)
-  return {
-    setId = setId,
-    keepBasicLands = false,
-    asBooster = false
-  }
-end
-
---[[
-     Worker
---]]
-worker = {};
-worker.isRunning = false;
-worker.keepBasicLands = false;
-worker.asBooster = false;
-
-function worker.run()
-  if not worker.isRunning then
-    worker.isRunning = true;
-    worker.determineOptions();
-    worker.handleQueue();
-  end
-end
-
-function worker.handleQueue()
-  if boosterQueue.hasItem() then
-    local nextTask = boosterQueue.popNext();
-    worker.appendOptionsToTask(nextTask);
-    boosterCreator.createByTask(nextTask, function() worker.handleQueue() end);
-  else
-    worker.isRunning = false;
-  end
-end
-
-function worker.appendOptionsToTask(task)
-  task.keepBasicLands = worker.keepBasicLands;
-  task.asBooster = worker.asBooster;
-  return task;
-end
-
-function worker.determineOptions()
-  worker.keepBasicLands = keepBasicLands();
-  worker.asBooster = spawnAsBooster();
-end
-
---[[
-     BoosterCreator
---]]
-boosterCreator = {
-  first = 0,
-  last = -1,
-  count = 0, -- count of cards in stack
-  bagGuid = '', --guId of bag
-  cards = {}, -- table of cardObjects
-  onFinish = function() end -- function after on booster was created
-};
-
-function boosterCreator.createByTask(task, onFinish)
-  boosterCreator.onFinish = onFinish;
-  boosterCreator.addBoosterToQueue(task);
-  if task.asBooster then
-    boosterCreator.createBag(task);
-  else
-    boosterCreator.createCardsFromQueue(task);
-  end
-
-end
-
-function boosterCreator.createBag(task)
-  local targetPosition = getObjectFromGUID(boardId).getPosition();
-  targetPosition.y = targetPosition.y + 10;
-  local spawnParams = {
-    type = "Custom_Model",
-    position = targetPosition,
-    rotation={x=0, y=180, z=0}
-  }
-  local bag = spawnObject(spawnParams)
-  bag.setName(setLoader.getSet(task.setId).setName);
-  bag.use_gravity = false
-  local bagName = task.setId;
-  if bagName == "con" then
-    bagName = "con_"
-  end
-  local options = {
-    mesh = "https://raw.githubusercontent.com/buflix/mtg-booster-gen/master/bag/mesh",
-    diffuse = "https://github.com/buflix/mtg-booster-gen/blob/master/bag/prints/" .. bagName .. ".png?raw=true",
-    normal = "https://github.com/buflix/mtg-booster-gen/blob/master/bag/normal.png?raw=true",
-    type = '6',
-  }
-  bag.setCustomObject(options)
-  -- only allow cards and decks in the bag to denie bag in bag
-  bag.script_code = 'function filterObjectEnter(obj) if obj.tag == "CARD" or obj.tag == "Deck" then return true else return false end end'
-  -- have to reload the bag toload the script and type
-  local newBag = bag.reload()
-  local waitForReload = function ()
-    boosterCreator.bagGuid = newBag.guid
-    boosterCreator.createCardsFromQueue(task)
-  end
-  Wait.frames(waitForReload, 1)
-end
-
-function boosterCreator.createCardsFromQueue(task)
-  if boosterCreator.hasItem() then
-    local card = boosterCreator.popNext();
-    local onCardSpawn = function(object)
-      boosterCreator.applyCardOptions(object, card.name, card.picture);
-      boosterCreator.createCardsFromQueue(task);
-    end
-    boosterCreator.createCard(boosterCreator.determineCardSpawnPosition(task), onCardSpawn);
-  else
-    local handleDeck = nil;
-    local deck = boosterCreator.groupCards();
-    if task.asBooster then
-      handleDeck = function() boosterCreator.putCardsIntoBag(deck) end
-    else
-      handleDeck = function() boosterCreator.onFinish() end
-    end
-    Wait.frames(handleDeck, 1) --wait one frame until deck is created
-  end
-end
-
-function boosterCreator.groupCards()
-  local decks = group(boosterCreator.cards);
-  local cardStack = nil;
-  for index,deck in ipairs(decks) do cardStack = deck end
-
-  return cardStack;
-end
-
-function boosterCreator.determineCardSpawnPosition(task)
-  local targetPosition = getObjectFromGUID(boardId).getPosition();
-  local boosterMod =  (task.asBooster and -5 or 0)
-  targetPosition.x = targetPosition.x - boosterMod;
-  targetPosition.y = boosterCreator.count / 4 + 1 + targetPosition.y -- use different hights, to avoid rnd stacks
-
-  return targetPosition
-end
-
-function boosterCreator.putCardsIntoBag(deck)
-  local bag = getObjectFromGUID(boosterCreator.bagGuid);
-  bag.putObject(deck)
-  bag.use_gravity = true;
-  boosterCreator.onFinish();
-end
-
-function boosterCreator.addBoosterToQueue(task)
-  local set = setLoader.getSet(task.setId);
-  local landmod = 0
-
-  if #set.land > 0 then
-    if task.keepBasicLands then
-      boosterCreator.addCardsByRarity(set, 'land', 1);
-    end
-  else
-    landmod = 1;
-  end
-
-  boosterCreator.addCardsByRarity(set, 'common', 10 + landmod)
-  boosterCreator.addCardsByRarity(set, 'uncommon', 3)
-  if boosterCreator.willDrawMythic(set) then
-    boosterCreator.addCardsByRarity(set, 'mythic', 1)
-  else
-    boosterCreator.addCardsByRarity(set, 'rare', 1)
-  end
-
-end
-
-function boosterCreator.addCardsByRarity(set, rarity, amount)
-  for i = 1, amount do
-    local card = set[rarity][math.random(1, #set[rarity])];
-    local entity = {
-      picture = card.image_uris.normal,
-      name = card.name
-    };
-    boosterCreator.push(entity);
-  end
-end
-
-function boosterCreator.willDrawMythic(set)
-  return #set.mythic > 0 and math.random(8) == 1
-end
-
-function boosterCreator.createCard(position, callback)
-  spawnParams = {
-    type = "CARD",
-    position = position,
-    rotation={x=180, y=0, z=0},
-    callback_function = callback
-  }
-  return spawnObject(spawnParams)
-end
-
-function boosterCreator.applyCardOptions(object, name, picture)
-  object.setName(name);
-  local params = {
-    face = picture,
-    back = 'https://github.com/buflix/mtg-booster-gen/blob/master/card/back.jpg?raw=true',
-  }
-  object.setCustomObject(params)
-  table.insert(boosterCreator.cards, object);
-end
-
---[[
-     inheritit queue
---]]
-
-function boosterCreator.push(value)
-  boosterCreator.count = boosterCreator.count + 1;
-  boosterCreator.last = boosterCreator.last + 1;
-  boosterCreator[boosterCreator.last] = value
-end
-
-function boosterCreator.popNext()
-  local first = boosterCreator.first
-  if first > boosterCreator.last then return nil end
-  local value = boosterCreator[first]
-  boosterCreator[first] = nil
-  boosterCreator.first = first + 1
-  boosterCreator.count = boosterCreator.count - 1;
-  return value
-end
-
-function boosterCreator.hasItem()
-  return boosterCreator.first <= boosterCreator.last
-end
-
---[[
-     setLoader
---]]
-setLoader = {};
-setLoader.processing = false;
-setLoader.sets = {};
-setLoader.onSetIsLoaded = function() end;
-
-function setLoader.loadSet(setId, callback)
-  if setLoader.hasSet(setId) then
-    callback();
-  else
-    if setLoader.processing then
-      printToAll("Can only fetch one set at the same time. Pls try again later", {r=1,g=0,b=0})
-    else
-      printToAll("Fetching set...");
-      setLoader.processing = true;
-      setLoader.requestSet(setId, 1)
-    end
-  end
-end
-
-function setLoader.requestSet(setId, page)
-  local request = "https://api.scryfall.com/cards/search?page=" .. page .. "&q=include%3Aextras+e%3A" .. setId
-  printToAll(request)
-  local waitUntilResponseExists = function(response)
-    local pipeFunc = function() setLoader.onFetchSetResponse(response, page) end
-    local checkResponse = function() return response.is_done end
-    Wait.condition(pipeFunc, checkResponse)
-  end
-
-  WebRequest.get(request, function(response) waitUntilResponseExists(response) end)
-
-end
-
-function setLoader.onFetchSetResponse(response, page)
-  local cards = luaJson.json2lua(response.text)
-  local setId = cards.data[1].set
-  local setName = cards.data[1].set_name;
-  local existingSet = setLoader.sets[setId]
-  local splittedSet = setLoader.splitByRarity(cards, existingSet)
-
-  splittedSet.setName = setName;
-  setLoader.sets[setId] = splittedSet;
-  if cards.has_more then
-    setLoader.requestSet(setId, page + 1)
-  else
-    setLoader.processing = false;
-    printToAll('Loading complete')
-    setLoader.onSetIsLoaded();
-    loadSet(setId);
-  end
-end
-
-function setLoader.splitByRarity(cards, existingSet)
-  local preparedSet
-  if existingSet == nil then
-    preparedSet = {
-      common = {},
-      uncommon = {},
-      rare = {},
-      mythic = {},
-      land = {}
-    }
-  else
-    preparedSet = existingSet
-  end
-
-  for i = 1, #cards.data do
-    local currentCard = cards.data[i];
-    local rarity
-    if  currentCard.booster then
-      if string.match(currentCard.type_line, 'Basic Land') then
-        rarity = 'land'
-      else
-        rarity = currentCard.rarity;
-      end
-      local currentLength = #preparedSet[rarity];
-      preparedSet[rarity][currentLength + 1] = currentCard;
-    end
-  end
-  return preparedSet
-end
-
-function setLoader.hasSet(setId)
-  return not (setLoader.sets[setId] == nil);
-end
-
-function setLoader.isProcessing()
-  return setLoader.processing;
-end
-
-function setLoader.getSet(setId)
-  return setLoader.sets[setId];
-end
-
---[[
-     Board
---]]
-boardId = '49e878'
-
-
-function keepBasicLands()
-  local keepBasicLandsId = 'f7e933'
-  local object = getObjectFromGUID(keepBasicLandsId);
-  return object.is_face_down
-end
-
-function spawnAsBooster()
-  local guId = '1645a7'
-  local object = getObjectFromGUID(guId);
-  return not object.is_face_down
-end
-
-function getAmountOfBoosters()
-  local guId = 'bf0ba7'
-  local object = getObjectFromGUID(guId);
-  return object.getValue();
-end
-
-
-function loadSet(setId)
-  if setLoader.hasSet(setId) then
-    triggerBoosterCreation(setId);
-  else
-    setLoader.loadSet(setId, function() triggerBoosterCreation(setId) end);
-  end
-end
-
-function triggerBoosterCreation(setId)
-  for i = 1, getAmountOfBoosters() do
-    local task = createTask(setId);
-    boosterQueue.push(task);
-  end
-  worker.run();
-end
-
---[[
-Buttons
---]]
-
-function onLoad()
-  local table = getObjectFromGUID(boardId);
-  local size = table.getBoundsNormalized().size;
-  local pos = table.getPosition();
-  pos.y = pos.y + 1
-
-  zoneSpawn = {position = pos
-         , scale = size
-         , type = 'ScriptingTrigger'
-         , callback = 'zoneCallback'
-         , callback_owner = self
-         , rotation = table.getRotation() }
-  spawnObject(zoneSpawn)
-
-end
-
-function zoneCallback(zone)
-  for _,object in ipairs(zone.getObjects()) do
-    if object.tag == 'Tile' then
-    params = {
-        click_function = "click_func",
-        function_owner = self,
-        position       = {0, 0, 0},
-        width          = 1000,
-        height         = 1000,
-        font_size      = 340,
-        tooltip        = object.getName()
-    }
-    object.createButton(params)
-    end
-  end
-end
-  --zone.destruct() --destroy the zone when you're done with it, to avoid clutter.
-function click_func(obj, color, alt_click)
-      loadSet(obj.getDescription())
-end
