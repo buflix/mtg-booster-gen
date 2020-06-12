@@ -38,8 +38,6 @@ function Collection:getCount()
   return self.count
 end
 
-
-
   --[[
        BoosterQueue
   --]]
@@ -68,6 +66,7 @@ function worker.handleQueue()
     boosterCreator.createByTask(nextTask, function() worker.handleQueue() end);
   else
     worker.isRunning = false;
+    boosterCreator.bagCount = 0;
   end
 end
 
@@ -88,6 +87,7 @@ end
 boosterCreator = {
   cardQueue = Collection:new(),
   bagGuid = '', --guId of bag
+  bagCount = 0,
   cards = {}, -- table of cardObjects
   onFinish = function() end -- function after on booster was created
 };
@@ -105,13 +105,19 @@ end
 
 function boosterCreator.createBag(task)
   local targetPosition = getObjectFromGUID(boardId).getPosition();
+  local column = (boosterCreator.bagCount % 5) * 3;
+  local row = math.floor(boosterCreator.bagCount / 5) * 3;
   targetPosition.y = targetPosition.y + 10;
+  targetPosition.x = targetPosition.x - 6 + (column);
+  targetPosition.z = targetPosition.z + 6 - row;
+
   local spawnParams = {
     type = "Custom_Model",
     position = targetPosition,
     rotation={x=0, y=180, z=0}
   }
   local bag = spawnObject(spawnParams)
+  boosterCreator.bagCount = boosterCreator.bagCount + 1;
   bag.setName(setLoader.getSet(task.setId).setName);
   bag.use_gravity = false
   local bagName = task.setId;
@@ -168,7 +174,7 @@ function boosterCreator.determineCardSpawnPosition(task)
   local targetPosition = getObjectFromGUID(boardId).getPosition();
   local boosterMod =  (task.asBooster and -5 or 0)
   targetPosition.x = targetPosition.x - boosterMod;
-  targetPosition.y = (boosterCreator.cardQueue:getCount() + 1) / 4 + 1 + targetPosition.y -- use different hights, to avoid rnd stacks
+  targetPosition.y = (boosterCreator.cardQueue:getCount() + 1) / 4 + 5 + targetPosition.y -- use different hights, to avoid rnd stacks
 
   return targetPosition
 end
@@ -205,11 +211,17 @@ end
 function boosterCreator.addCardsByRarity(set, rarity, amount)
   for i = 1, amount do
     local card = set[rarity][math.random(1, #set[rarity])];
-    local entity = {
-      picture = card.image_uris.normal,
-      name = card.name
-    };
-    boosterCreator.cardQueue:push(entity);
+    print(set.setName)
+    if card.image_uris and card.image_uris.normal and card.name then
+      local entity = {
+        picture = card.image_uris.normal,
+        name = card.name
+      };
+      boosterCreator.cardQueue:push(entity);
+    else
+      amount = amount + 1
+    end
+
   end
 end
 
@@ -246,6 +258,7 @@ setLoader.sets = {};
 setLoader.onSetIsLoaded = function() end;
 
 function setLoader.loadSet(setId, callback)
+  setLoader.onSetIsLoaded = callback;
   if setLoader.hasSet(setId) then
     callback();
   else
@@ -261,7 +274,7 @@ end
 
 function setLoader.requestSet(setId, page)
   local request = "https://api.scryfall.com/cards/search?page=" .. page .. "&q=include%3Aextras+e%3A" .. setId
-  printToAll(request)
+  printToAll('Loading set ' .. setId .. ', page ' .. page)
   local waitUntilResponseExists = function(response)
     local pipeFunc = function() setLoader.onFetchSetResponse(response, page) end
     local checkResponse = function() return response.is_done end
@@ -285,9 +298,8 @@ function setLoader.onFetchSetResponse(response, page)
     setLoader.requestSet(setId, page + 1)
   else
     setLoader.processing = false;
-    printToAll('Loading complete')
+    printToAll('Loading complete', {r=0,g=1,b=0})
     setLoader.onSetIsLoaded();
-    loadSet(setId);
   end
 end
 
@@ -337,7 +349,7 @@ end
      Board
 --]]
 boardId = '49e878'
-
+setNames = {}
 
 function keepBasicLands()
   local keepBasicLandsId = 'f7e933'
@@ -387,41 +399,79 @@ Buttons
 --]]
 
 function onLoad()
+  createButtons();
+end
+
+function createButtons()
   local table = getObjectFromGUID(boardId);
   local size = table.getBoundsNormalized().size;
   local pos = table.getPosition();
   pos.y = pos.y + 1
 
-  zoneSpawn = {position = pos
+  local zoneSpawn = {position = pos
          , scale = size
          , type = 'ScriptingTrigger'
-         , callback = 'zoneCallback'
+         , callback = 'applyButtons'
          , callback_owner = self
          , rotation = table.getRotation() }
   spawnObject(zoneSpawn)
-
 end
 
-function zoneCallback(zone)
+function applyButtons(zone)
   for _,object in ipairs(zone.getObjects()) do
     if object.tag == 'Tile' then
-    params = {
-        click_function = "click_func",
-        function_owner = self,
-        position       = {0, 0, 0},
-        width          = 1000,
-        height         = 1000,
-        font_size      = 340,
-        tooltip        = object.getName()
-    }
-    object.createButton(params)
+        if object.getDescription() ~= 'rnd' then
+          table.insert(setNames, object.getDescription())
+        end
+        createButton(object)
     end
   end
 end
-  --zone.destruct() --destroy the zone when you're done with it, to avoid clutter.
-function click_func(obj, color, alt_click)
-      loadSet(obj.getDescription())
+
+function createButton(tile)
+  local callback;
+  if tile.getDescription() == 'rnd' then
+    callback = 'onClickRndButton';
+  else
+    callback = 'onClickSetButton';
+  end
+  local params = {
+      click_function = callback,
+      function_owner = self,
+      position       = {0, 0, 0},
+      width          = 1000,
+      height         = 1000,
+      font_size      = 340,
+      tooltip        = tile.getName()
+  }
+  tile.createButton(params)
 end
+
+function onClickSetButton(obj)
+  loadSet(obj.getDescription())
+end
+
+function onClickRndButton(obj)
+  local rndSets = Collection:new();
+  for i = 1, getAmountOfBoosters() do
+    local rndIndex = math.random(1, #setNames);
+    rndSets:push(setNames[rndIndex]);
+  end
+    triggerRndBoosterCreation(rndSets);
+end
+
+function triggerRndBoosterCreation(rndSetCollection)
+  print(rndSetCollection:getCount());
+    if rndSetCollection:hasItem() then
+      local setId = rndSetCollection:popNext();
+      print(setId)
+      boosterQueue:push(createTask(setId));
+      setLoader.loadSet(setId, function() triggerRndBoosterCreation(rndSetCollection) end);
+    else
+      worker.run()
+    end
+end
+
 
 -- https://github.com/BanMing/BanMingLuaLab/blob/master/LuaTest/Test/LuaJson.lua
 luaJson = {}
