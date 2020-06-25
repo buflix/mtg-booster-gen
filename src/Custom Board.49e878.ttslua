@@ -172,7 +172,7 @@ end
 
 function boosterCreator.determineCardSpawnPosition(task)
   local targetPosition = getObjectFromGUID(boardId).getPosition();
-  local boosterMod =  (task.asBooster and -5 or 0)
+  local boosterMod =  (task.asBooster and -10 or 0)
   targetPosition.x = targetPosition.x - boosterMod;
   targetPosition.y = (boosterCreator.cardQueue:getCount() + 1) / 4 + 5 + targetPosition.y -- use different hights, to avoid rnd stacks
 
@@ -209,17 +209,19 @@ function boosterCreator.addBoosterToQueue(task)
 end
 
 function boosterCreator.addCardsByRarity(set, rarity, amount)
+  local usedCardIds = {};
   for i = 1, amount do
     local card = set[rarity][math.random(1, #set[rarity])];
-    print(set.setName)
-    if card.image_uris and card.image_uris.normal and card.name then
+    -- and usedCardIds[card.collector_number] != true
+    if card.image_uris and card.image_uris.normal and card.name and usedCardIds[card.collector_number] != true then
       local entity = {
         picture = card.image_uris.normal,
         name = card.name
       };
+      usedCardIds[card.collector_number] = true
       boosterCreator.cardQueue:push(entity);
     else
-      amount = amount + 1
+      boosterCreator.addCardsByRarity(set, rarity, 1)
     end
 
   end
@@ -365,8 +367,14 @@ end
 
 function getAmountOfBoosters()
   local guId = 'bf0ba7'
-  local object = getObjectFromGUID(guId);
-  return object.getValue();
+  local amount = getObjectFromGUID(guId).getValue();
+  if amount > 20 then
+    printToAll('Too many boosters. Pls respect the platform which provides the cards', {r=1,g=0,b=0})
+    printToAll("")
+    error("", 3)
+    printToAll("")
+  end
+    return amount;
 end
 
 
@@ -461,10 +469,9 @@ function onClickRndButton(obj)
 end
 
 function triggerRndBoosterCreation(rndSetCollection)
-  print(rndSetCollection:getCount());
+  printToAll('Booster ' .. rndSetCollection:getCount());
     if rndSetCollection:hasItem() then
       local setId = rndSetCollection:popNext();
-      print(setId)
       boosterQueue:push(createTask(setId));
       setLoader.loadSet(setId, function() triggerRndBoosterCreation(rndSetCollection) end);
     else
